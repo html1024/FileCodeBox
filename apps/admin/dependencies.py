@@ -50,7 +50,7 @@ def verify_token(token: str) -> dict:
         ).digest()
         expected_signature_b64 = base64.b64encode(expected_signature).decode()
 
-        if signature_b64 != expected_signature_b64:
+        if not hmac.compare_digest(signature_b64, expected_signature_b64):
             raise ValueError("无效的签名")
 
         # 解码payload
@@ -65,39 +65,41 @@ def verify_token(token: str) -> dict:
         raise ValueError(f"token验证失败: {str(e)}")
 
 
+def _extract_bearer_token(authorization: str) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="未授权或授权校验失败")
+    token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="未授权或授权校验失败")
+    return token
+
+
+def _require_admin_payload(authorization: str) -> dict:
+    token = _extract_bearer_token(authorization)
+    try:
+        payload = verify_token(token)
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    if not payload.get("is_admin", False):
+        raise HTTPException(status_code=401, detail="未授权或授权校验失败")
+    return payload
+
+
+ADMIN_PUBLIC_ENDPOINTS = {("POST", "/admin/login")}
+
+
 async def admin_required(
     authorization: str = Header(default=None), request: Request = None
 ):
     """
     验证管理员权限
     """
-    try:
-        if not authorization or not authorization.startswith("Bearer "):
-            is_admin = False
-        else:
-            try:
-                token = authorization.split(" ")[1]
-                payload = verify_token(token)
-                is_admin = payload.get("is_admin", False)
-            except ValueError as e:
-                is_admin = False
-
-        if request.url.path.startswith("/share/"):
-            if not settings.openUpload and not is_admin:
-                raise HTTPException(
-                    status_code=403, detail="本站未开启游客上传，如需上传请先登录后台"
-                )
-        else:
-            if not is_admin:
-                raise HTTPException(status_code=401, detail="未授权或授权校验失败")
-        return is_admin
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+    if request and (request.method, request.url.path) in ADMIN_PUBLIC_ENDPOINTS:
+        return None
+    return _require_admin_payload(authorization)
 
 
-async def share_required_login(
-    authorization: str = Header(default=None), request: Request = None
-):
+async def share_required_login(authorization: str = Header(default=None)):
     """
     验证分享上传权限
     
@@ -109,21 +111,11 @@ async def share_required_login(
     :return: 验证结果
     """
     if not settings.openUpload:
-        try:
-            if not authorization or not authorization.startswith("Bearer "):
-                raise HTTPException(
-                    status_code=403, detail="本站未开启游客上传，如需上传请先登录后台"
-                )
-            
-            token = authorization.split(" ")[1]
-            try:
-                payload = verify_token(token)
-                if not payload.get("is_admin", False):
-                    raise HTTPException(status_code=401, detail="未授权或授权校验失败")
-            except ValueError as e:
-                raise HTTPException(status_code=401, detail=str(e))
-        except Exception as e:
-            raise HTTPException(status_code=401, detail="认证失败：" + str(e))
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(
+                status_code=403, detail="本站未开启游客上传，如需上传请先登录后台"
+            )
+        _require_admin_payload(authorization)
 
     return True
 
